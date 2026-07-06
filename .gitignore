@@ -1,0 +1,11 @@
+.DS_Store
+
+*.elf
+*.hex
+*.bin
+*.map
+*.with_bootloader.bin
+*.with_bootloader.hex
+
+build/
+.cache/

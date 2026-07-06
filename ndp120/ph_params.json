@@ -1,0 +1,1 @@
+{"ph_type": "SC", "states": [{"timeout": 0, "timeout_action": "stay", "timeout_action_arg": 0, "classes": [{"label": "snoring", "phwin": 5, "phth": 0.7, "phbackoff": 20, "phaction": 0, "phaction_arg": 0, "smoothing_queue_size": 1}, {"label": "snoring", "phwin": 255, "phth": 0.998, "phbackoff": 0, "phaction": 2, "phaction_arg": 2, "smoothing_queue_size": 1}]}]}
