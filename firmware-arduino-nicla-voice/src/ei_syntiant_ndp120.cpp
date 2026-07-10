@@ -234,6 +234,14 @@ void ei_setup(char* fw1, char* fw2, char* fw3)
  * 
  */
 void bmi_main(){
+  static unsigned long last_imu_read_ms = 0;
+  unsigned long now = millis();
+
+  if ((now - last_imu_read_ms) < 100) {
+    return;
+  }
+  last_imu_read_ms = now;
+
   uint8_t __attribute__((aligned(4))) sensor_data[SENSOR_DATA_LENGTH];
 
   int16_t x_acc_raw, y_acc_raw, z_acc_raw, x_gyr_raw, y_gyr_raw, z_gyr_raw;
@@ -260,6 +268,42 @@ void bmi_main(){
   y_gyr = y_gyr_raw * GYRO_SCALE_FACTOR;
   z_gyr = z_gyr_raw * GYRO_SCALE_FACTOR;
 
+  static constexpr int FILTER_SAMPLES = 8;
+  static float x_hist[FILTER_SAMPLES] = {0};
+  static float y_hist[FILTER_SAMPLES] = {0};
+  static float z_hist[FILTER_SAMPLES] = {0};
+  static int hist_index = 0;
+  static bool hist_full = false;
+
+  x_hist[hist_index] = x_acc;
+  y_hist[hist_index] = y_acc;
+  z_hist[hist_index] = z_acc;
+
+  hist_index++;
+  if (hist_index >= FILTER_SAMPLES) {
+    hist_index = 0;
+    hist_full = true;
+  }
+
+  int valid_samples = hist_full ? FILTER_SAMPLES : hist_index;
+  if (valid_samples <= 0) {
+    return;
+  }
+
+  float x_sum = 0.0f;
+  float y_sum = 0.0f;
+  float z_sum = 0.0f;
+
+  for (int i = 0; i < valid_samples; i++) {
+    x_sum += x_hist[i];
+    y_sum += y_hist[i];
+    z_sum += z_hist[i];
+  }
+
+  float x_acc_f = x_sum / valid_samples;
+  float y_acc_f = y_sum / valid_samples;
+  float z_acc_f = z_sum / valid_samples;
+
   Serial.print("x_acc:");
   Serial.print(x_acc);
   Serial.print(",");
@@ -269,7 +313,48 @@ void bmi_main(){
   Serial.print("z_acc:");
   Serial.println(z_acc);
 
-  float magnitude = sqrt(x_acc * x_acc + y_acc * y_acc + z_acc * z_acc);
+  float magnitude = sqrt(x_acc_f * x_acc_f + y_acc_f * y_acc_f + z_acc_f * z_acc_f);
+  float gyro_abs_max = max(max(fabs(x_gyr), fabs(y_gyr)), fabs(z_gyr));
+
+  static bool supina = false;
+  static unsigned long enter_candidate_since = 0;
+  static unsigned long exit_candidate_since = 0;
+
+  const float GRAVITY_MIN = 9.2f;
+  const float GRAVITY_MAX = 10.3f;
+  const float GYRO_MAX = 12.0f;
+
+  const float ENTER_Z_MIN = 8.8f;
+  const float ENTER_X_MAX = 2.0f;
+  const float ENTER_Y_MAX = 3.0f;
+
+  const float EXIT_Z_MIN = 8.3f;
+  const float EXIT_X_MAX = 2.4f;
+  const float EXIT_Y_MAX = 3.4f;
+
+  const float DOMINANCE_MARGIN = 6.0f;
+
+  const unsigned long ENTER_TIME_MS = 1200;
+  const unsigned long EXIT_TIME_MS = 800;
+
+  bool stable_gravity = (magnitude >= GRAVITY_MIN && magnitude <= GRAVITY_MAX);
+  bool low_rotation = (gyro_abs_max <= GYRO_MAX);
+
+  bool enter_supina_candidate =
+      stable_gravity &&
+      low_rotation &&
+      z_acc_f >= ENTER_Z_MIN &&
+      fabs(x_acc_f) <= ENTER_X_MAX &&
+      fabs(y_acc_f) <= ENTER_Y_MAX &&
+      z_acc_f > fabs(x_acc_f) + DOMINANCE_MARGIN &&
+      z_acc_f > fabs(y_acc_f) + DOMINANCE_MARGIN;
+
+  bool stay_supina_candidate =
+      stable_gravity &&
+      low_rotation &&
+      z_acc_f >= EXIT_Z_MIN &&
+      fabs(x_acc_f) <= EXIT_X_MAX &&
+      fabs(y_acc_f) <= EXIT_Y_MAX;
 
 // if (magnitude > shakeThreshold) {
 //     Serial.println("Sacudida forte detectada!");
@@ -291,31 +376,62 @@ void bmi_main(){
 //   Serial.println(magnitude);
 //   // Print gyroscope data (expressed in °/s). 
   
+  if (!supina) {
+    if (enter_supina_candidate) {
+      if (enter_candidate_since == 0) {
+        enter_candidate_since = now;
+      }
 
-  delay(100);
-  unsigned long atualmillis=millis();
-
-  int ledon=0;
-    if (
-    z_acc > 6 && x_acc > -3 && x_acc <3         
-) {
-     nicla::leds.setColor(red); 
-     digitalWrite(10, HIGH);  
-     instante_anterior=millis();
-
-     if(ledon=0 ){
-        anteriormillis=millis();
-        ledon=1;
+      if ((now - enter_candidate_since) >= ENTER_TIME_MS) {
+        supina = true;
+        enter_candidate_since = 0;
+        exit_candidate_since = 0;
+        nicla::leds.setColor(red);
+        digitalWrite(10, HIGH);
+        instante_anterior = now;
+      }
     }
-    
-  } else {
-    nicla::leds.setColor(off);  
-
-    if (atualmillis - anteriormillis>= 2000) {
-        nicla::leds.setColor(off);
-        ledon=0;
+    else {
+      enter_candidate_since = 0;
+      nicla::leds.setColor(off);
     }
   }
+  else {
+    if (stay_supina_candidate) {
+      exit_candidate_since = 0;
+      nicla::leds.setColor(red);
+      digitalWrite(10, HIGH);
+      instante_anterior = now;
+    }
+    else {
+      if (exit_candidate_since == 0) {
+        exit_candidate_since = now;
+      }
+
+      if ((now - exit_candidate_since) >= EXIT_TIME_MS) {
+        supina = false;
+        exit_candidate_since = 0;
+        nicla::leds.setColor(off);
+      }
+    }
+  }
+
+  if ((now - instante_anterior) >= tempo_motor) {
+    digitalWrite(10, LOW);
+  }
+
+  Serial.print("x_acc_f:");
+  Serial.print(x_acc_f);
+  Serial.print(", y_acc_f:");
+  Serial.print(y_acc_f);
+  Serial.print(", z_acc_f:");
+  Serial.print(z_acc_f);
+  Serial.print(", mag:");
+  Serial.print(magnitude);
+  Serial.print(", gyr_max:");
+  Serial.print(gyro_abs_max);
+  Serial.print(", supina:");
+  Serial.println(supina ? 1 : 0);
 }
 
 
@@ -432,6 +548,8 @@ static void match_event(char* label)
              
                         if( 0==strcmp(label, "NN0:Snoring") )
 	    {
+           Serial.print("RONCO DETETADO EM: ");
+           Serial.println(millis());
 	       nicla::leds.setColor(blue);
            fila.push(millis());
            if (fila.size()>3){
